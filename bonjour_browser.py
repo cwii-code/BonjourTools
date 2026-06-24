@@ -27,18 +27,31 @@ except ImportError:
 # ── Service types to scan ────────────────────────────────────────────────────
 
 SERVICE_TYPES = [
+    # Web / management
     "_http._tcp",
     "_https._tcp",
+    "_http-alt._tcp",           # HTTP on alternate port (BMC web UI)
+    # Remote control / KVM
+    "_rfb._tcp",                # VNC / KVM-over-IP  ← ASPEED BMC uses this
+    "_rdlink._tcp",             # unknown embedded device
+    "_teamviewer._tcp",         # TeamViewer
+    # Printers / scanners
     "_ipp._tcp",
     "_ipps._tcp",
     "_printer._tcp",
     "_pdl-datastream._tcp",
+    "_scanner._tcp",
+    "_uscan._tcp",
+    # File sharing
     "_smb._tcp",
     "_afpovertcp._tcp",
     "_ftp._tcp",
+    # Remote access
     "_ssh._tcp",
+    # Apple ecosystem
     "_airplay._tcp",
     "_raop._tcp",
+    "_companion-link._tcp",
     "_googlecast._tcp",
     "_spotify-connect._tcp",
     "_daap._tcp",
@@ -49,16 +62,23 @@ SERVICE_TYPES = [
 SERVICE_LABELS = {
     "_http._tcp":           "Web (HTTP)",
     "_https._tcp":          "Web (HTTPS)",
+    "_http-alt._tcp":       "Web (HTTP alt port)",
+    "_rfb._tcp":            "KVM / VNC (RFB)",      # ASPEED BMC
+    "_rdlink._tcp":         "RD Link (unknown)",
+    "_teamviewer._tcp":     "TeamViewer",
     "_ipp._tcp":            "Printer (IPP)",
     "_ipps._tcp":           "Printer (IPPS)",
     "_printer._tcp":        "Printer",
     "_pdl-datastream._tcp": "Printer (PDL)",
+    "_scanner._tcp":        "Scanner",
+    "_uscan._tcp":          "USB Scanner",
     "_smb._tcp":            "File Share (SMB)",
     "_afpovertcp._tcp":     "File Share (AFP)",
     "_ftp._tcp":            "FTP",
     "_ssh._tcp":            "SSH",
     "_airplay._tcp":        "AirPlay",
     "_raop._tcp":           "AirPlay Audio",
+    "_companion-link._tcp": "Apple Companion Link",
     "_googlecast._tcp":     "Chromecast",
     "_spotify-connect._tcp":"Spotify Connect",
     "_daap._tcp":           "iTunes Share",
@@ -108,12 +128,13 @@ def _web_url(service_key: str, address: str, port: int) -> str | None:
     if "_https" in service_key or "_ipps" in service_key:
         scheme, default_port = "https", 443
     elif any(k in service_key for k in ("_http", "_ipp", "_printer", "_pdl", "_daap",
-                                         "_airplay", "_googlecast")):
+                                         "_airplay", "_googlecast", "_rdlink")):
         scheme, default_port = "http", 80
     elif "_ftp" in service_key:
         scheme, default_port = "ftp", 21
     else:
-        return None
+        # For VNC/RFB and unknown types, still try HTTP on their port
+        return f"http://{address}:{port}" if port not in (5900, 0) else None
     return f"{scheme}://{address}" if port == default_port else f"{scheme}://{address}:{port}"
 
 
