@@ -1,2 +1,2 @@
-zeroconf>=0.131.0
+# zeroconf is no longer needed — now uses Apple Bonjour SDK (dns-sd.exe)
 tkinterweb>=3.23.0
