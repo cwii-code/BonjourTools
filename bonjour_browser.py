@@ -349,10 +349,10 @@ class BonjourBrowser(tk.Tk):
             return
 
         url = _web_url(device["service_type"], device["addresses"], device["port"])
+        self._show_info_page(device, url)
         if url:
-            self._load_url(url)
-        else:
-            self._show_info_page(device)
+            import webbrowser
+            webbrowser.open(url)
 
     def _on_url_changed(self, *_):
         url = self._url_var.get()
@@ -397,11 +397,28 @@ class BonjourBrowser(tk.Tk):
         if url:
             self._load_url(url)
 
-    def _show_info_page(self, device: dict):
+    def _show_info_page(self, device: dict, url: str | None = None):
         label = SERVICE_LABELS.get(device["service_type"], device["service_type"])
         ip    = ", ".join(device["addresses"]) if device["addresses"] else "N/A"
         short = _short_name(device["name"])
-        html  = f"""
+
+        if url:
+            self._url_var.set(url)
+            url_row = f"""
+            <tr><td style="color:#888;padding:4px 24px 4px 0">URL</td>
+                <td><a href="{url}" style="color:#0078d7">{url}</a></td></tr>"""
+            open_msg = f"""
+            <div style="margin-top:28px;padding:16px;background:#e8f4fd;
+                        border-radius:6px;border-left:4px solid #0078d7">
+              <b style="color:#0078d7">Opening in your default browser...</b><br>
+              <span style="color:#555;font-size:13px">{url}</span>
+            </div>"""
+        else:
+            self._url_var.set(f"bonjour://{device.get('server','')}")
+            url_row = ""
+            open_msg = '<p style="color:#aaa;margin-top:24px;font-size:13px">This service does not have a web interface.</p>'
+
+        html = f"""
         <html><body style="font-family:Segoe UI,Arial,sans-serif;
                            padding:32px;color:#333;background:#fff">
           <h2 style="color:#0078d7;margin-bottom:4px">{short}</h2>
@@ -416,12 +433,11 @@ class BonjourBrowser(tk.Tk):
                 <td>{device['port']}</td></tr>
             <tr><td style="color:#888;padding:4px 24px 4px 0">Service</td>
                 <td>{device['service_type']}</td></tr>
+            {url_row}
           </table>
-          <p style="color:#aaa;margin-top:32px;font-size:13px">
-            This service type does not have a web interface.
-          </p>
+          {open_msg}
         </body></html>"""
-        self._url_var.set(f"bonjour://{device['server']}")
+
         if self._webview:
             self._webview.load_html(html)
 
