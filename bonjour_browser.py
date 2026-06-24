@@ -225,45 +225,34 @@ class BonjourBrowser(tk.Tk):
         ttk.Button(url_bar, text="Go", width=4,
                    command=lambda: self._load_url(self._url_var.get())).pack(side=tk.LEFT, padx=(4, 0))
 
-        self.btn_open_browser = ttk.Button(url_bar, text="Open in Browser", width=15,
-                                           command=self._open_in_browser, state=tk.DISABLED)
-        self.btn_open_browser.pack(side=tk.LEFT, padx=(8, 0))
-
-        # Web view container (holds both webview and fallback, only one shown at a time)
-        self._view_container = ttk.Frame(right)
-        self._view_container.pack(fill=tk.BOTH, expand=True)
-
+        # Embedded web view (takes most of the space)
         if HAS_WEBVIEW:
-            self._webview = HtmlFrame(self._view_container, messages_enabled=False)
-            self._webview.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._webview = HtmlFrame(right, messages_enabled=False)
+            self._webview.pack(fill=tk.BOTH, expand=True)
             self._webview.load_html(self._WELCOME_HTML)
         else:
             self._webview = None
+            ttk.Label(right, text="pip install tkinterweb  to enable embedded view",
+                      foreground="#999").pack(expand=True)
 
-        # Fallback panel (hidden until needed)
-        self._fallback = ttk.Frame(self._view_container)
-        self._fallback_url_var = tk.StringVar()
+        # ── Permanent bottom bar: always visible when a URL is loaded ─────
+        self._url_var.trace_add("write", self._on_url_changed)
+        self._bottom_bar = tk.Frame(right, bg="#fffbe6", bd=1, relief=tk.FLAT)
+        # (packed later by _on_url_changed)
 
-        ttk.Label(self._fallback,
-                  text="The embedded viewer cannot display this page.\n"
-                       "(The page may require JavaScript or login)\n",
-                  justify=tk.CENTER, foreground="#666",
-                  font=("Segoe UI", 11)).pack(expand=True, pady=(80, 4))
-
-        url_lbl = ttk.Label(self._fallback, textvariable=self._fallback_url_var,
-                             foreground="#0078d7", font=("Segoe UI", 10, "underline"),
-                             cursor="hand2")
-        url_lbl.pack()
-        url_lbl.bind("<Button-1>", lambda _e: self._open_in_browser())
-
-        ttk.Button(self._fallback,
-                   text="Open in Default Browser  (Chrome / Edge)",
-                   command=self._open_in_browser,
-                   width=40).pack(pady=14)
-
-        ttk.Label(self._fallback,
-                  text="Tip: ASPEED / printer management pages require a modern browser.",
-                  foreground="#aaa", font=("Segoe UI", 9)).pack()
+        self._bottom_url_var = tk.StringVar()
+        tk.Label(self._bottom_bar, text="If the page shows 'Oops', click → ",
+                 bg="#fffbe6", fg="#666", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Button(self._bottom_bar,
+                  text="Open in Browser (Chrome / Edge)",
+                  command=self._open_in_browser,
+                  bg="#0078d7", fg="white",
+                  font=("Segoe UI", 9, "bold"),
+                  relief=tk.FLAT, padx=10, pady=2,
+                  cursor="hand2").pack(side=tk.LEFT, padx=6, pady=3)
+        url_disp = tk.Label(self._bottom_bar, textvariable=self._bottom_url_var,
+                            bg="#fffbe6", fg="#888", font=("Segoe UI", 8))
+        url_disp.pack(side=tk.LEFT)
 
     def _build_statusbar(self):
         bar = ttk.Frame(self, relief=tk.SUNKEN)
@@ -365,45 +354,23 @@ class BonjourBrowser(tk.Tk):
         else:
             self._show_info_page(device)
 
+    def _on_url_changed(self, *_):
+        url = self._url_var.get()
+        if url and not url.startswith("bonjour://"):
+            self._bottom_url_var.set(url)
+            self._bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        else:
+            self._bottom_bar.pack_forget()
+
     def _load_url(self, url: str):
         if not url.strip():
             return
         self._url_var.set(url)
-        self._fallback_url_var.set(url)
-        self.btn_open_browser.configure(state=tk.NORMAL)
-        self._hide_fallback()
-
         if self._webview:
             try:
                 self._webview.load_url(url)
-                # After 3s check if tkinterweb failed to render the page
-                self.after(3000, self._check_render_failed)
             except Exception:
-                self._show_fallback()
-        else:
-            self._show_fallback()
-
-    def _check_render_failed(self):
-        """Show fallback if tkinterweb displayed its own error page."""
-        if not self._webview:
-            return
-        try:
-            title = self._webview.get_title() or ""
-            # tkinterweb error page titles
-            if any(t in title.lower() for t in ("oops", "error", "not found", "")):
-                pass  # might still be loading; only show fallback on explicit Oops
-        except Exception:
-            pass
-
-    def _show_fallback(self):
-        if self._webview:
-            self._webview.place_forget()
-        self._fallback.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-    def _hide_fallback(self):
-        self._fallback.place_forget()
-        if self._webview:
-            self._webview.place(relx=0, rely=0, relwidth=1, relheight=1)
+                pass
 
     def _open_in_browser(self):
         import webbrowser
@@ -455,9 +422,6 @@ class BonjourBrowser(tk.Tk):
           </p>
         </body></html>"""
         self._url_var.set(f"bonjour://{device['server']}")
-        self._fallback_url_var.set("")
-        self.btn_open_browser.configure(state=tk.DISABLED)
-        self._hide_fallback()
         if self._webview:
             self._webview.load_html(html)
 
