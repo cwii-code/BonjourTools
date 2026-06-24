@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Bonjour Browser - IE-style GUI with embedded web view.
-Left panel : discovered mDNS/Bonjour devices (tree view)
-Right panel: embedded web browser for selected device
+Bonjour Browser - discovers mDNS/Bonjour devices on the local network.
+Double-click a device to open its web page in the default browser.
 
 Requirements:
-    pip install zeroconf tkinterweb
+    pip install zeroconf
 """
 
 import socket
@@ -13,12 +12,6 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
-
-try:
-    from tkinterweb import HtmlFrame
-    HAS_WEBVIEW = True
-except ImportError:
-    HAS_WEBVIEW = False
 
 # ── Service types to scan ────────────────────────────────────────────────────
 
@@ -132,46 +125,31 @@ class _Listener(ServiceListener):
 # ── Main application ─────────────────────────────────────────────────────────
 
 class BonjourBrowser(tk.Tk):
-    _WELCOME_HTML = """
-    <html><body style="font-family:Segoe UI,Arial,sans-serif;
-                        display:flex;align-items:center;
-                        justify-content:center;height:90vh;margin:0;
-                        background:#f8f8f8;color:#555;">
-      <div style="text-align:center">
-        <h2 style="color:#0078d7">Bonjour Browser</h2>
-        <p>Click <b>Scan</b> to discover devices on your network.<br>
-           Select a device on the left to open its web page here.</p>
-      </div>
-    </body></html>"""
 
     def __init__(self):
         super().__init__()
         self.title("Bonjour Browser")
-        self.geometry("1200x700")
-        self.minsize(800, 500)
+        self.geometry("900x560")
+        self.minsize(600, 360)
 
         self._zc: Zeroconf | None = None
         self._scanning = False
-        self._devices: dict[str, dict] = {}
-        self._cat_nodes: dict[str, str] = {}
-        self._dev_nodes: dict[str, str] = {}
+        self._devices: dict[str, dict] = {}   # name -> device info
+        self._cat_nodes: dict[str, str] = {}   # label -> tree iid
+        self._dev_nodes: dict[str, str] = {}   # name  -> tree iid
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── UI construction ───────────────────────────────────────────────────
+    # ── UI ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._build_toolbar()
-        self._build_main_pane()
-        self._build_statusbar()
-
-    def _build_toolbar(self):
-        bar = ttk.Frame(self, relief=tk.FLAT)
+        # Toolbar
+        bar = ttk.Frame(self)
         bar.pack(fill=tk.X, padx=6, pady=(6, 2))
 
-        self.btn_scan = ttk.Button(bar, text="▶  Scan",  width=10, command=self._start_scan)
-        self.btn_stop = ttk.Button(bar, text="■  Stop",  width=10, command=self._stop_scan,
+        self.btn_scan = ttk.Button(bar, text="▶  Scan", width=10, command=self._start_scan)
+        self.btn_stop = ttk.Button(bar, text="■  Stop", width=10, command=self._stop_scan,
                                    state=tk.DISABLED)
         self.btn_scan.pack(side=tk.LEFT, padx=(0, 4))
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 10))
@@ -181,87 +159,49 @@ class BonjourBrowser(tk.Tk):
         self._status = tk.StringVar(value="Ready — click Scan to start.")
         ttk.Label(bar, textvariable=self._status, foreground="#444").pack(side=tk.LEFT, padx=6)
 
-    def _build_main_pane(self):
-        pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        ttk.Label(bar, text="Double-click a device to open in browser",
+                  foreground="#999", font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=8)
 
-        # ── Left: device tree ─────────────────────────────────────────────
-        left = ttk.Frame(pane, width=280)
-        left.pack_propagate(False)
-        pane.add(left, weight=1)
+        # Device tree with columns
+        tree_frame = ttk.Frame(self)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
-        ttk.Label(left, text="Local Network Devices",
-                  font=("Segoe UI", 9, "bold"), foreground="#333").pack(
-                  anchor=tk.W, padx=6, pady=(2, 2))
+        cols = ("ip", "port", "service")
+        self._tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings",
+                                  selectmode="browse")
 
-        tree_wrap = ttk.Frame(left)
-        tree_wrap.pack(fill=tk.BOTH, expand=True)
+        # Tree (name) column
+        self._tree.heading("#0",      text="Device Name",  anchor=tk.W)
+        self._tree.heading("ip",      text="IP Address",   anchor=tk.W)
+        self._tree.heading("port",    text="Port",         anchor=tk.W)
+        self._tree.heading("service", text="Service Type", anchor=tk.W)
 
-        self._tree = ttk.Treeview(tree_wrap, selectmode="browse", show="tree")
-        vsb = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self._tree.yview)
-        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.column("#0",      width=260, minwidth=180, stretch=True)
+        self._tree.column("ip",      width=150, minwidth=130, stretch=True)
+        self._tree.column("port",    width=60,  minwidth=50,  stretch=False)
+        self._tree.column("service", width=200, minwidth=150, stretch=True)
+
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,   command=self._tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self._tree.xview)
+        self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._tree.pack(fill=tk.BOTH, expand=True)
+
         self._tree.tag_configure("cat", font=("Segoe UI", 9, "bold"), foreground="#0078d7")
         self._tree.tag_configure("dev", font=("Segoe UI", 9))
-        self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # ── Right: URL bar + web view ─────────────────────────────────────
-        right = ttk.Frame(pane)
-        pane.add(right, weight=5)
+        # Double-click opens in browser
+        self._tree.bind("<Double-Button-1>", self._on_double_click)
 
-        url_bar = ttk.Frame(right)
-        url_bar.pack(fill=tk.X, padx=4, pady=(2, 2))
-
-        ttk.Button(url_bar, text="◀", width=3, command=self._go_back).pack(side=tk.LEFT)
-        ttk.Button(url_bar, text="▶", width=3, command=self._go_forward).pack(side=tk.LEFT, padx=(2, 0))
-        ttk.Button(url_bar, text="↺", width=3, command=self._go_reload).pack(side=tk.LEFT, padx=(2, 6))
-
-        self._url_var = tk.StringVar()
-        url_entry = ttk.Entry(url_bar, textvariable=self._url_var, font=("Segoe UI", 9))
-        url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        url_entry.bind("<Return>", lambda _e: self._load_url(self._url_var.get()))
-
-        ttk.Button(url_bar, text="Go", width=4,
-                   command=lambda: self._load_url(self._url_var.get())).pack(side=tk.LEFT, padx=(4, 0))
-
-        # Embedded web view (takes most of the space)
-        if HAS_WEBVIEW:
-            self._webview = HtmlFrame(right, messages_enabled=False)
-            self._webview.pack(fill=tk.BOTH, expand=True)
-            self._webview.load_html(self._WELCOME_HTML)
-        else:
-            self._webview = None
-            ttk.Label(right, text="pip install tkinterweb  to enable embedded view",
-                      foreground="#999").pack(expand=True)
-
-        # ── Permanent bottom bar: always visible when a URL is loaded ─────
-        self._url_var.trace_add("write", self._on_url_changed)
-        self._bottom_bar = tk.Frame(right, bg="#fffbe6", bd=1, relief=tk.FLAT)
-        # (packed later by _on_url_changed)
-
-        self._bottom_url_var = tk.StringVar()
-        tk.Label(self._bottom_bar, text="If the page shows 'Oops', click → ",
-                 bg="#fffbe6", fg="#666", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(self._bottom_bar,
-                  text="Open in Browser (Chrome / Edge)",
-                  command=self._open_in_browser,
-                  bg="#0078d7", fg="white",
-                  font=("Segoe UI", 9, "bold"),
-                  relief=tk.FLAT, padx=10, pady=2,
-                  cursor="hand2").pack(side=tk.LEFT, padx=6, pady=3)
-        url_disp = tk.Label(self._bottom_bar, textvariable=self._bottom_url_var,
-                            bg="#fffbe6", fg="#888", font=("Segoe UI", 8))
-        url_disp.pack(side=tk.LEFT)
-
-    def _build_statusbar(self):
-        bar = ttk.Frame(self, relief=tk.SUNKEN)
-        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        # Status bar
+        sbar = ttk.Frame(self, relief=tk.SUNKEN)
+        sbar.pack(fill=tk.X, side=tk.BOTTOM)
         self._count_var = tk.StringVar(value="No devices found.")
-        ttk.Label(bar, textvariable=self._count_var, anchor=tk.W,
+        ttk.Label(sbar, textvariable=self._count_var, anchor=tk.W,
                   foreground="#555").pack(side=tk.LEFT, padx=6, pady=1)
 
-    # ── Scan control ──────────────────────────────────────────────────────
+    # ── Scan ──────────────────────────────────────────────────────────────
 
     def _start_scan(self):
         if self._scanning:
@@ -293,7 +233,7 @@ class BonjourBrowser(tk.Tk):
         self.btn_scan.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.DISABLED)
         n = len(self._devices)
-        self._status.set(f"Stopped. {n} device(s) found.")
+        self._status.set(f"Stopped.  {n} device(s) found.")
         self._count_var.set(f"{n} device(s) found.")
 
     # ── Device events ─────────────────────────────────────────────────────
@@ -315,18 +255,23 @@ class BonjourBrowser(tk.Tk):
 
             if label not in self._cat_nodes:
                 cat = self._tree.insert("", tk.END, text=f"  {label}",
-                                        open=True, tags=("cat",))
+                                        open=True, tags=("cat",),
+                                        values=("", "", ""))
                 self._cat_nodes[label] = cat
 
             cat = self._cat_nodes[label]
-            ip = info["addresses"][0] if info["addresses"] else "?"
+            ip   = info["addresses"][0] if info["addresses"] else ""
+            port = str(info["port"]) if info["port"] else ""
             short = _short_name(name)
 
             if name not in self._dev_nodes:
                 iid = self._tree.insert(cat, tk.END,
-                                        text=f"  {short}   {ip}",
+                                        text=f"  {short}",
                                         tags=("dev",),
-                                        values=(name,))
+                                        values=(ip, port, stype.rstrip(".")),
+                                        iid=None)
+                # Store device key in the item's hidden tag list
+                self._tree.item(iid, tags=("dev", name))
                 self._dev_nodes[name] = iid
 
         n = len(self._devices)
@@ -334,112 +279,30 @@ class BonjourBrowser(tk.Tk):
         if self._scanning:
             self._status.set(f"Scanning…  {n} device(s) found so far.")
 
-    # ── Navigation ────────────────────────────────────────────────────────
+    # ── Double-click ──────────────────────────────────────────────────────
 
-    def _on_select(self, _event=None):
-        sel = self._tree.selection()
-        if not sel:
+    def _on_double_click(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
             return
-        vals = self._tree.item(sel[0], "values")
-        if not vals:
+        tags = self._tree.item(iid, "tags")
+        # Category nodes have tag "cat"; device nodes have ("dev", device_name)
+        if not tags or tags[0] == "cat":
             return
-        name = vals[0]
+        name = tags[1] if len(tags) > 1 else None
+        if not name:
+            return
         device = self._devices.get(name)
         if not device:
             return
 
         url = _web_url(device["service_type"], device["addresses"], device["port"])
-        self._show_info_page(device, url)
         if url:
             import webbrowser
             webbrowser.open(url)
-
-    def _on_url_changed(self, *_):
-        url = self._url_var.get()
-        if url and not url.startswith("bonjour://"):
-            self._bottom_url_var.set(url)
-            self._bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
+            self._status.set(f"Opened: {url}")
         else:
-            self._bottom_bar.pack_forget()
-
-    def _load_url(self, url: str):
-        if not url.strip():
-            return
-        self._url_var.set(url)
-        if self._webview:
-            try:
-                self._webview.load_url(url)
-            except Exception:
-                pass
-
-    def _open_in_browser(self):
-        import webbrowser
-        url = self._url_var.get()
-        if url and not url.startswith("bonjour://"):
-            webbrowser.open(url)
-
-    def _go_back(self):
-        if self._webview:
-            try:
-                self._webview.go_back()
-            except Exception:
-                pass
-
-    def _go_forward(self):
-        if self._webview:
-            try:
-                self._webview.go_forward()
-            except Exception:
-                pass
-
-    def _go_reload(self):
-        url = self._url_var.get()
-        if url:
-            self._load_url(url)
-
-    def _show_info_page(self, device: dict, url: str | None = None):
-        label = SERVICE_LABELS.get(device["service_type"], device["service_type"])
-        ip    = ", ".join(device["addresses"]) if device["addresses"] else "N/A"
-        short = _short_name(device["name"])
-
-        if url:
-            self._url_var.set(url)
-            url_row = f"""
-            <tr><td style="color:#888;padding:4px 24px 4px 0">URL</td>
-                <td><a href="{url}" style="color:#0078d7">{url}</a></td></tr>"""
-            open_msg = f"""
-            <div style="margin-top:28px;padding:16px;background:#e8f4fd;
-                        border-radius:6px;border-left:4px solid #0078d7">
-              <b style="color:#0078d7">Opening in your default browser...</b><br>
-              <span style="color:#555;font-size:13px">{url}</span>
-            </div>"""
-        else:
-            self._url_var.set(f"bonjour://{device.get('server','')}")
-            url_row = ""
-            open_msg = '<p style="color:#aaa;margin-top:24px;font-size:13px">This service does not have a web interface.</p>'
-
-        html = f"""
-        <html><body style="font-family:Segoe UI,Arial,sans-serif;
-                           padding:32px;color:#333;background:#fff">
-          <h2 style="color:#0078d7;margin-bottom:4px">{short}</h2>
-          <p style="color:#888;margin-top:0">{label}</p>
-          <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
-          <table style="border-collapse:collapse;font-size:14px">
-            <tr><td style="color:#888;padding:4px 24px 4px 0">Host</td>
-                <td><b>{device['server']}</b></td></tr>
-            <tr><td style="color:#888;padding:4px 24px 4px 0">IP Address</td>
-                <td>{ip}</td></tr>
-            <tr><td style="color:#888;padding:4px 24px 4px 0">Port</td>
-                <td>{device['port']}</td></tr>
-            <tr><td style="color:#888;padding:4px 24px 4px 0">Service</td>
-                <td>{device['service_type']}</td></tr>
-            {url_row}
-          </table>
-          {open_msg}
-        </body></html>"""
-
-        if self._webview:
-            self._webview.load_html(html)
+            self._status.set(f"No web interface for {_short_name(name)}")
 
     # ── Close ─────────────────────────────────────────────────────────────
 
