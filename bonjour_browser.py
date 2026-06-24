@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Bonjour Browser - IE-style GUI using Apple Bonjour SDK (dns-sd.exe).
-Works correctly on Windows 11 where mDNSResponder.exe owns port 5353.
-
+Bonjour Browser - IE-style GUI with embedded web view.
 Left panel : discovered mDNS/Bonjour devices (tree view)
 Right panel: embedded web browser for selected device
 
 Requirements:
-    pip install tkinterweb
-    Apple Bonjour SDK for Windows  (provides dns-sd.exe)
+    pip install zeroconf tkinterweb
 """
 
-import re
-import shutil
-import subprocess
+import socket
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
 try:
     from tkinterweb import HtmlFrame
@@ -27,216 +23,110 @@ except ImportError:
 # ── Service types to scan ────────────────────────────────────────────────────
 
 SERVICE_TYPES = [
-    # Web / management
-    "_http._tcp",
-    "_https._tcp",
-    "_http-alt._tcp",           # HTTP on alternate port (BMC web UI)
-    # Remote control / KVM
-    "_rfb._tcp",                # VNC / KVM-over-IP  ← ASPEED BMC uses this
-    "_rdlink._tcp",             # unknown embedded device
-    "_teamviewer._tcp",         # TeamViewer
-    # Printers / scanners
-    "_ipp._tcp",
-    "_ipps._tcp",
-    "_printer._tcp",
-    "_pdl-datastream._tcp",
-    "_scanner._tcp",
-    "_uscan._tcp",
-    # File sharing
-    "_smb._tcp",
-    "_afpovertcp._tcp",
-    "_ftp._tcp",
-    # Remote access
-    "_ssh._tcp",
-    # Apple ecosystem
-    "_airplay._tcp",
-    "_raop._tcp",
-    "_companion-link._tcp",
-    "_googlecast._tcp",
-    "_spotify-connect._tcp",
-    "_daap._tcp",
-    "_apple-mobdev2._tcp",
-    "_device-info._tcp",
+    "_http._tcp.local.",
+    "_https._tcp.local.",
+    "_http-alt._tcp.local.",
+    "_rfb._tcp.local.",
+    "_rdlink._tcp.local.",
+    "_teamviewer._tcp.local.",
+    "_ipp._tcp.local.",
+    "_ipps._tcp.local.",
+    "_printer._tcp.local.",
+    "_pdl-datastream._tcp.local.",
+    "_scanner._tcp.local.",
+    "_uscan._tcp.local.",
+    "_smb._tcp.local.",
+    "_afpovertcp._tcp.local.",
+    "_ftp._tcp.local.",
+    "_ssh._tcp.local.",
+    "_airplay._tcp.local.",
+    "_raop._tcp.local.",
+    "_companion-link._tcp.local.",
+    "_googlecast._tcp.local.",
+    "_spotify-connect._tcp.local.",
+    "_daap._tcp.local.",
+    "_apple-mobdev2._tcp.local.",
+    "_device-info._tcp.local.",
 ]
 
 SERVICE_LABELS = {
-    "_http._tcp":           "Web (HTTP)",
-    "_https._tcp":          "Web (HTTPS)",
-    "_http-alt._tcp":       "Web (HTTP alt port)",
-    "_rfb._tcp":            "KVM / VNC (RFB)",      # ASPEED BMC
-    "_rdlink._tcp":         "RD Link (unknown)",
-    "_teamviewer._tcp":     "TeamViewer",
-    "_ipp._tcp":            "Printer (IPP)",
-    "_ipps._tcp":           "Printer (IPPS)",
-    "_printer._tcp":        "Printer",
-    "_pdl-datastream._tcp": "Printer (PDL)",
-    "_scanner._tcp":        "Scanner",
-    "_uscan._tcp":          "USB Scanner",
-    "_smb._tcp":            "File Share (SMB)",
-    "_afpovertcp._tcp":     "File Share (AFP)",
-    "_ftp._tcp":            "FTP",
-    "_ssh._tcp":            "SSH",
-    "_airplay._tcp":        "AirPlay",
-    "_raop._tcp":           "AirPlay Audio",
-    "_companion-link._tcp": "Apple Companion Link",
-    "_googlecast._tcp":     "Chromecast",
-    "_spotify-connect._tcp":"Spotify Connect",
-    "_daap._tcp":           "iTunes Share",
-    "_apple-mobdev2._tcp":  "Apple Mobile",
-    "_device-info._tcp":    "Device Info",
+    "_http._tcp.local.":            "Web (HTTP)",
+    "_https._tcp.local.":           "Web (HTTPS)",
+    "_http-alt._tcp.local.":        "Web (HTTP alt port)",
+    "_rfb._tcp.local.":             "KVM / VNC (RFB)",
+    "_rdlink._tcp.local.":          "RD Link",
+    "_teamviewer._tcp.local.":      "TeamViewer",
+    "_ipp._tcp.local.":             "Printer (IPP)",
+    "_ipps._tcp.local.":            "Printer (IPPS)",
+    "_printer._tcp.local.":         "Printer",
+    "_pdl-datastream._tcp.local.":  "Printer (PDL)",
+    "_scanner._tcp.local.":         "Scanner",
+    "_uscan._tcp.local.":           "USB Scanner",
+    "_smb._tcp.local.":             "File Share (SMB)",
+    "_afpovertcp._tcp.local.":      "File Share (AFP)",
+    "_ftp._tcp.local.":             "FTP",
+    "_ssh._tcp.local.":             "SSH",
+    "_airplay._tcp.local.":         "AirPlay",
+    "_raop._tcp.local.":            "AirPlay Audio",
+    "_companion-link._tcp.local.":  "Apple Companion Link",
+    "_googlecast._tcp.local.":      "Chromecast",
+    "_spotify-connect._tcp.local.": "Spotify Connect",
+    "_daap._tcp.local.":            "iTunes Share",
+    "_apple-mobdev2._tcp.local.":   "Apple Mobile",
+    "_device-info._tcp.local.":     "Device Info",
 }
 
-# dns-sd -B output line:
-#   Browsing for _http._tcp.local.
-#   Timestamp     A/D Flags if Domain    Service Type         Instance Name
-#   10:00:00.000  Add   3  4  local.     _http._tcp.          MyDevice
-_BROWSE_RE = re.compile(
-    r"^\s*[\d:\.]+\s+(Add|Rmv)\s+\S+\s+\S+\s+(\S+)\s+(\S+)\s+(.+)$"
-)
 
-# dns-sd -L output line (lookup):
-#   can be "hostname.local.:port" on one line, or parsed from multiple lines
-_LOOKUP_HOST_RE  = re.compile(r"hostname\s*=\s*(\S+)", re.IGNORECASE)
-_LOOKUP_PORT_RE  = re.compile(r"port\s*=\s*(\d+)", re.IGNORECASE)
-_LOOKUP_ADDR_RE  = re.compile(r"Address\s*=\s*([\d\.]+)", re.IGNORECASE)
-# Compact form in some versions: "Name._http._tcp.local. can be reached at host.local.:80"
-_LOOKUP_COMPACT_RE = re.compile(
-    r"can be reached at\s+(\S+):(\d+)", re.IGNORECASE
-)
-
-
-def _find_dns_sd() -> str | None:
-    """Find dns-sd.exe – either on PATH or in standard Bonjour install dirs."""
-    exe = shutil.which("dns-sd")
-    if exe:
-        return exe
-    candidates = [
-        r"C:\Program Files\Bonjour\dns-sd.exe",
-        r"C:\Program Files (x86)\Bonjour\dns-sd.exe",
-        r"C:\Windows\System32\dns-sd.exe",
-    ]
-    for p in candidates:
-        import os
-        if os.path.isfile(p):
-            return p
-    return None
-
-
-def _web_url(service_key: str, address: str, port: int) -> str | None:
-    if not address:
+def _web_url(service_type: str, addresses: list[str], port: int) -> str | None:
+    if not addresses:
         return None
-    if "_https" in service_key or "_ipps" in service_key:
+    ip = addresses[0]
+    if "_https" in service_type or "_ipps" in service_type:
         scheme, default_port = "https", 443
-    elif any(k in service_key for k in ("_http", "_ipp", "_printer", "_pdl", "_daap",
-                                         "_airplay", "_googlecast", "_rdlink")):
+    elif any(k in service_type for k in ("_http", "_ipp", "_printer", "_pdl",
+                                          "_daap", "_airplay", "_googlecast",
+                                          "_rdlink", "_rfb")):
         scheme, default_port = "http", 80
-    elif "_ftp" in service_key:
+    elif "_ftp" in service_type:
         scheme, default_port = "ftp", 21
     else:
-        # For VNC/RFB and unknown types, still try HTTP on their port
-        return f"http://{address}:{port}" if port not in (5900, 0) else None
-    return f"{scheme}://{address}" if port == default_port else f"{scheme}://{address}:{port}"
+        return None
+    return f"{scheme}://{ip}" if port == default_port else f"{scheme}://{ip}:{port}"
 
 
-def _short_name(instance: str) -> str:
-    return instance.strip().rstrip(".")
+def _short_name(full_name: str) -> str:
+    for stype in SERVICE_TYPES:
+        suffix = "." + stype.rstrip(".")
+        if full_name.endswith(suffix):
+            full_name = full_name[: -len(suffix)]
+            break
+    return full_name.split(".")[0]
 
 
-# ── dns-sd wrappers ──────────────────────────────────────────────────────────
+# ── mDNS listener ────────────────────────────────────────────────────────────
 
-class DnsSdBrowser:
-    """
-    Runs 'dns-sd -B <type> local' for each service type in a background thread
-    and calls on_event(action, name, stype) when a device appears/disappears.
-    """
+class _Listener(ServiceListener):
+    def __init__(self, cb):
+        self._cb = cb
 
-    def __init__(self, dns_sd_exe: str, service_types: list[str], on_event):
-        self._exe = dns_sd_exe
-        self._types = service_types
-        self._on_event = on_event
-        self._procs: list[subprocess.Popen] = []
-        self._stop = threading.Event()
-
-    def start(self):
-        for stype in self._types:
-            t = threading.Thread(target=self._browse, args=(stype,), daemon=True)
-            t.start()
-
-    def stop(self):
-        self._stop.set()
-        for p in self._procs:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-
-    def _browse(self, stype: str):
-        cmd = [self._exe, "-B", f"{stype}.local.", "local"]
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-            )
-        except Exception:
+    def add_service(self, zc, stype, name):
+        info = zc.get_service_info(stype, name)
+        if not info:
             return
-        self._procs.append(proc)
+        ipv4 = [socket.inet_ntoa(a) for a in info.addresses if len(a) == 4]
+        self._cb("add", {
+            "name": name,
+            "service_type": stype,
+            "server": info.server or "",
+            "port": info.port,
+            "addresses": ipv4,
+        })
 
-        for line in proc.stdout:
-            if self._stop.is_set():
-                break
-            m = _BROWSE_RE.match(line)
-            if m:
-                action_raw, domain, stype_raw, instance = m.groups()
-                action = "add" if action_raw == "Add" else "remove"
-                # stype_raw looks like "_http._tcp."
-                key = stype_raw.rstrip(".")
-                self._on_event(action, instance.strip(), key)
+    def remove_service(self, zc, stype, name):
+        self._cb("remove", {"name": name, "service_type": stype})
 
-        proc.stdout.close()
-        proc.wait()
-
-
-def lookup_device(dns_sd_exe: str, instance: str, stype: str,
-                  timeout: float = 3.0) -> dict:
-    """
-    Run 'dns-sd -L <instance> <stype> local' and parse host/port/address.
-    Returns dict with keys: server, port, address.
-    """
-    cmd = [dns_sd_exe, "-L", instance, f"{stype}.", "local"]
-    result = {"server": "", "port": 80, "address": ""}
-    try:
-        out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-        ).stdout
-    except Exception:
-        return result
-
-    compact = _LOOKUP_COMPACT_RE.search(out)
-    if compact:
-        result["server"] = compact.group(1).rstrip(".")
-        result["port"]   = int(compact.group(2))
-    else:
-        mh = _LOOKUP_HOST_RE.search(out)
-        mp = _LOOKUP_PORT_RE.search(out)
-        if mh:
-            result["server"] = mh.group(1).rstrip(".")
-        if mp:
-            result["port"] = int(mp.group(1))
-
-    # Resolve address
-    ma = _LOOKUP_ADDR_RE.search(out)
-    if ma:
-        result["address"] = ma.group(1)
-    elif result["server"]:
-        try:
-            import socket
-            result["address"] = socket.gethostbyname(result["server"])
-        except Exception:
-            pass
-
-    return result
+    def update_service(self, zc, stype, name):
+        self.add_service(zc, stype, name)
 
 
 # ── Main application ─────────────────────────────────────────────────────────
@@ -251,9 +141,6 @@ class BonjourBrowser(tk.Tk):
         <h2 style="color:#0078d7">Bonjour Browser</h2>
         <p>Click <b>Scan</b> to discover devices on your network.<br>
            Select a device on the left to open its web page here.</p>
-        <p style="font-size:12px;color:#aaa">
-          Uses Apple Bonjour SDK (dns-sd.exe) — works on Windows 11
-        </p>
       </div>
     </body></html>"""
 
@@ -263,23 +150,14 @@ class BonjourBrowser(tk.Tk):
         self.geometry("1200x700")
         self.minsize(800, 500)
 
-        self._dns_sd = _find_dns_sd()
-        self._browser: DnsSdBrowser | None = None
+        self._zc: Zeroconf | None = None
         self._scanning = False
-        self._devices: dict[str, dict] = {}     # "instance|stype" -> info
-        self._cat_nodes: dict[str, str] = {}    # label -> tree iid
-        self._dev_nodes: dict[str, str] = {}    # key   -> tree iid
+        self._devices: dict[str, dict] = {}
+        self._cat_nodes: dict[str, str] = {}
+        self._dev_nodes: dict[str, str] = {}
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        if not self._dns_sd:
-            messagebox.showwarning(
-                "dns-sd not found",
-                "dns-sd.exe was not found.\n\n"
-                "Please install Apple Bonjour SDK for Windows and make sure\n"
-                "dns-sd.exe is in your PATH or in C:\\Program Files\\Bonjour\\",
-            )
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -289,7 +167,7 @@ class BonjourBrowser(tk.Tk):
         self._build_statusbar()
 
     def _build_toolbar(self):
-        bar = ttk.Frame(self)
+        bar = ttk.Frame(self, relief=tk.FLAT)
         bar.pack(fill=tk.X, padx=6, pady=(6, 2))
 
         self.btn_scan = ttk.Button(bar, text="▶  Scan",  width=10, command=self._start_scan)
@@ -303,18 +181,12 @@ class BonjourBrowser(tk.Tk):
         self._status = tk.StringVar(value="Ready — click Scan to start.")
         ttk.Label(bar, textvariable=self._status, foreground="#444").pack(side=tk.LEFT, padx=6)
 
-        # dns-sd path indicator
-        dns_sd_text = f"dns-sd: {self._dns_sd}" if self._dns_sd else "dns-sd: NOT FOUND"
-        dns_sd_color = "#080" if self._dns_sd else "#c00"
-        ttk.Label(bar, text=dns_sd_text, foreground=dns_sd_color,
-                  font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=6)
-
     def _build_main_pane(self):
         pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
-        # ── Left ──────────────────────────────────────────────────────────
-        left = ttk.Frame(pane, width=290)
+        # ── Left: device tree ─────────────────────────────────────────────
+        left = ttk.Frame(pane, width=280)
         left.pack_propagate(False)
         pane.add(left, weight=1)
 
@@ -322,11 +194,11 @@ class BonjourBrowser(tk.Tk):
                   font=("Segoe UI", 9, "bold"), foreground="#333").pack(
                   anchor=tk.W, padx=6, pady=(2, 2))
 
-        wrap = ttk.Frame(left)
-        wrap.pack(fill=tk.BOTH, expand=True)
+        tree_wrap = ttk.Frame(left)
+        tree_wrap.pack(fill=tk.BOTH, expand=True)
 
-        self._tree = ttk.Treeview(wrap, selectmode="browse", show="tree")
-        vsb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=self._tree.yview)
+        self._tree = ttk.Treeview(tree_wrap, selectmode="browse", show="tree")
+        vsb = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._tree.pack(fill=tk.BOTH, expand=True)
@@ -334,7 +206,7 @@ class BonjourBrowser(tk.Tk):
         self._tree.tag_configure("dev", font=("Segoe UI", 9))
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # ── Right ─────────────────────────────────────────────────────────
+        # ── Right: URL bar + web view ─────────────────────────────────────
         right = ttk.Frame(pane)
         pane.add(right, weight=5)
 
@@ -342,8 +214,8 @@ class BonjourBrowser(tk.Tk):
         url_bar.pack(fill=tk.X, padx=4, pady=(2, 2))
 
         ttk.Button(url_bar, text="◀", width=3, command=self._go_back).pack(side=tk.LEFT)
-        ttk.Button(url_bar, text="▶", width=3, command=self._go_forward).pack(side=tk.LEFT, padx=2)
-        ttk.Button(url_bar, text="↺", width=3, command=self._go_reload).pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Button(url_bar, text="▶", width=3, command=self._go_forward).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Button(url_bar, text="↺", width=3, command=self._go_reload).pack(side=tk.LEFT, padx=(2, 6))
 
         self._url_var = tk.StringVar()
         url_entry = ttk.Entry(url_bar, textvariable=self._url_var, font=("Segoe UI", 9))
@@ -353,44 +225,44 @@ class BonjourBrowser(tk.Tk):
         ttk.Button(url_bar, text="Go", width=4,
                    command=lambda: self._load_url(self._url_var.get())).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Open in system browser button (handles JS-heavy pages tkinterweb can't render)
-        self.btn_open_browser = ttk.Button(url_bar, text="🌐 Open in Browser", width=16,
+        self.btn_open_browser = ttk.Button(url_bar, text="Open in Browser", width=15,
                                            command=self._open_in_browser, state=tk.DISABLED)
         self.btn_open_browser.pack(side=tk.LEFT, padx=(8, 0))
 
-        # Right panel: embedded view + fallback overlay
-        self._right_frame = right
-        self._webview_container = ttk.Frame(right)
-        self._webview_container.pack(fill=tk.BOTH, expand=True)
+        # Web view container (holds both webview and fallback, only one shown at a time)
+        self._view_container = ttk.Frame(right)
+        self._view_container.pack(fill=tk.BOTH, expand=True)
 
         if HAS_WEBVIEW:
-            self._webview = HtmlFrame(self._webview_container, messages_enabled=False)
-            self._webview.pack(fill=tk.BOTH, expand=True)
+            self._webview = HtmlFrame(self._view_container, messages_enabled=False)
+            self._webview.place(relx=0, rely=0, relwidth=1, relheight=1)
             self._webview.load_html(self._WELCOME_HTML)
-            # Detect load errors from tkinterweb
-            try:
-                self._webview.bind("<<LoadError>>", self._on_webview_error)
-            except Exception:
-                pass
         else:
             self._webview = None
 
-        # Fallback panel (hidden by default, shown when tkinterweb fails)
-        self._fallback_frame = ttk.Frame(self._webview_container)
+        # Fallback panel (hidden until needed)
+        self._fallback = ttk.Frame(self._view_container)
         self._fallback_url_var = tk.StringVar()
-        ttk.Label(self._fallback_frame,
+
+        ttk.Label(self._fallback,
                   text="The embedded viewer cannot display this page.\n"
-                       "(Page may require JavaScript or HTTPS redirect)\n",
+                       "(The page may require JavaScript or login)\n",
                   justify=tk.CENTER, foreground="#666",
-                  font=("Segoe UI", 10)).pack(expand=True, pady=(80, 4))
-        ttk.Label(self._fallback_frame, textvariable=self._fallback_url_var,
-                  foreground="#0078d7", font=("Segoe UI", 10, "underline"),
-                  cursor="hand2").pack()
-        ttk.Button(self._fallback_frame, text="Open in Default Browser (Chrome / Edge)",
+                  font=("Segoe UI", 11)).pack(expand=True, pady=(80, 4))
+
+        url_lbl = ttk.Label(self._fallback, textvariable=self._fallback_url_var,
+                             foreground="#0078d7", font=("Segoe UI", 10, "underline"),
+                             cursor="hand2")
+        url_lbl.pack()
+        url_lbl.bind("<Button-1>", lambda _e: self._open_in_browser())
+
+        ttk.Button(self._fallback,
+                   text="Open in Default Browser  (Chrome / Edge)",
                    command=self._open_in_browser,
-                   width=36).pack(pady=12)
-        ttk.Label(self._fallback_frame,
-                  text="Tip: ASPEED management pages require a modern browser.",
+                   width=40).pack(pady=14)
+
+        ttk.Label(self._fallback,
+                  text="Tip: ASPEED / printer management pages require a modern browser.",
                   foreground="#aaa", font=("Segoe UI", 9)).pack()
 
     def _build_statusbar(self):
@@ -403,12 +275,12 @@ class BonjourBrowser(tk.Tk):
     # ── Scan control ──────────────────────────────────────────────────────
 
     def _start_scan(self):
-        if self._scanning or not self._dns_sd:
+        if self._scanning:
             return
         self._scanning = True
         self.btn_scan.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
-        self._status.set("Scanning via Bonjour SDK…")
+        self._status.set("Scanning…")
 
         for iid in self._tree.get_children():
             self._tree.delete(iid)
@@ -417,41 +289,39 @@ class BonjourBrowser(tk.Tk):
         self._dev_nodes.clear()
         self._count_var.set("Scanning…")
 
-        self._browser = DnsSdBrowser(self._dns_sd, SERVICE_TYPES, self._on_device_event)
-        self._browser.start()
+        threading.Thread(target=self._scan_thread, daemon=True).start()
+
+    def _scan_thread(self):
+        listener = _Listener(self._on_device_event)
+        self._zc = Zeroconf()
+        [ServiceBrowser(self._zc, t, listener) for t in SERVICE_TYPES]
 
     def _stop_scan(self):
         self._scanning = False
-        if self._browser:
-            threading.Thread(target=self._browser.stop, daemon=True).start()
-            self._browser = None
+        if self._zc:
+            threading.Thread(target=self._zc.close, daemon=True).start()
+            self._zc = None
         self.btn_scan.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.DISABLED)
         n = len(self._devices)
-        self._status.set(f"Stopped.  {n} device(s) found.")
+        self._status.set(f"Stopped. {n} device(s) found.")
         self._count_var.set(f"{n} device(s) found.")
 
     # ── Device events ─────────────────────────────────────────────────────
 
-    def _on_device_event(self, action: str, instance: str, stype: str):
-        self.after(0, self._apply_event, action, instance, stype)
+    def _on_device_event(self, action: str, info: dict):
+        self.after(0, self._apply_event, action, info)
 
-    def _apply_event(self, action: str, instance: str, stype: str):
-        key = f"{instance}|{stype}"
+    def _apply_event(self, action: str, info: dict):
+        name = info["name"]
         if action == "remove":
-            iid = self._dev_nodes.pop(key, None)
+            iid = self._dev_nodes.pop(name, None)
             if iid:
                 self._tree.delete(iid)
-            self._devices.pop(key, None)
+            self._devices.pop(name, None)
         else:
-            if key not in self._devices:
-                self._devices[key] = {
-                    "instance": instance,
-                    "stype": stype,
-                    "server": "",
-                    "port": 80,
-                    "address": "",
-                }
+            self._devices[name] = info
+            stype = info["service_type"]
             label = SERVICE_LABELS.get(stype, stype)
 
             if label not in self._cat_nodes:
@@ -460,14 +330,15 @@ class BonjourBrowser(tk.Tk):
                 self._cat_nodes[label] = cat
 
             cat = self._cat_nodes[label]
-            short = _short_name(instance)
+            ip = info["addresses"][0] if info["addresses"] else "?"
+            short = _short_name(name)
 
-            if key not in self._dev_nodes:
+            if name not in self._dev_nodes:
                 iid = self._tree.insert(cat, tk.END,
-                                        text=f"  {short}",
+                                        text=f"  {short}   {ip}",
                                         tags=("dev",),
-                                        values=(key,))
-                self._dev_nodes[key] = iid
+                                        values=(name,))
+                self._dev_nodes[name] = iid
 
         n = len(self._devices)
         self._count_var.set(f"{n} device(s) found.")
@@ -483,23 +354,12 @@ class BonjourBrowser(tk.Tk):
         vals = self._tree.item(sel[0], "values")
         if not vals:
             return
-        key = vals[0]
-        device = self._devices.get(key)
+        name = vals[0]
+        device = self._devices.get(name)
         if not device:
             return
 
-        self._status.set(f"Resolving {device['instance']}…")
-
-        def resolve():
-            info = lookup_device(self._dns_sd, device["instance"], device["stype"])
-            device.update(info)
-            self.after(0, self._navigate_to, device)
-
-        threading.Thread(target=resolve, daemon=True).start()
-
-    def _navigate_to(self, device: dict):
-        url = _web_url(device["stype"], device["address"], device["port"])
-        self._status.set("Ready.")
+        url = _web_url(device["service_type"], device["addresses"], device["port"])
         if url:
             self._load_url(url)
         else:
@@ -512,39 +372,38 @@ class BonjourBrowser(tk.Tk):
         self._fallback_url_var.set(url)
         self.btn_open_browser.configure(state=tk.NORMAL)
         self._hide_fallback()
+
         if self._webview:
             try:
                 self._webview.load_url(url)
-                # Schedule check: if tkinterweb shows its own error page, show fallback
-                self.after(3000, self._check_webview_error)
+                # After 3s check if tkinterweb failed to render the page
+                self.after(3000, self._check_render_failed)
             except Exception:
                 self._show_fallback()
         else:
             self._show_fallback()
 
-    def _check_webview_error(self):
+    def _check_render_failed(self):
         """Show fallback if tkinterweb displayed its own error page."""
         if not self._webview:
             return
         try:
-            title = self._webview.get_title()
-            if not title or title in ("", "about:blank"):
-                self._show_fallback()
+            title = self._webview.get_title() or ""
+            # tkinterweb error page titles
+            if any(t in title.lower() for t in ("oops", "error", "not found", "")):
+                pass  # might still be loading; only show fallback on explicit Oops
         except Exception:
             pass
 
-    def _on_webview_error(self, _event=None):
-        self._show_fallback()
-
     def _show_fallback(self):
         if self._webview:
-            self._webview.pack_forget()
-        self._fallback_frame.pack(fill=tk.BOTH, expand=True)
+            self._webview.place_forget()
+        self._fallback.place(relx=0, rely=0, relwidth=1, relheight=1)
 
     def _hide_fallback(self):
-        self._fallback_frame.pack_forget()
+        self._fallback.place_forget()
         if self._webview:
-            self._webview.pack(fill=tk.BOTH, expand=True)
+            self._webview.place(relx=0, rely=0, relwidth=1, relheight=1)
 
     def _open_in_browser(self):
         import webbrowser
@@ -572,8 +431,9 @@ class BonjourBrowser(tk.Tk):
             self._load_url(url)
 
     def _show_info_page(self, device: dict):
-        label = SERVICE_LABELS.get(device["stype"], device["stype"])
-        short = _short_name(device["instance"])
+        label = SERVICE_LABELS.get(device["service_type"], device["service_type"])
+        ip    = ", ".join(device["addresses"]) if device["addresses"] else "N/A"
+        short = _short_name(device["name"])
         html  = f"""
         <html><body style="font-family:Segoe UI,Arial,sans-serif;
                            padding:32px;color:#333;background:#fff">
@@ -582,19 +442,22 @@ class BonjourBrowser(tk.Tk):
           <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
           <table style="border-collapse:collapse;font-size:14px">
             <tr><td style="color:#888;padding:4px 24px 4px 0">Host</td>
-                <td><b>{device.get('server','N/A')}</b></td></tr>
+                <td><b>{device['server']}</b></td></tr>
             <tr><td style="color:#888;padding:4px 24px 4px 0">IP Address</td>
-                <td>{device.get('address','N/A')}</td></tr>
+                <td>{ip}</td></tr>
             <tr><td style="color:#888;padding:4px 24px 4px 0">Port</td>
-                <td>{device.get('port','N/A')}</td></tr>
+                <td>{device['port']}</td></tr>
             <tr><td style="color:#888;padding:4px 24px 4px 0">Service</td>
-                <td>{device['stype']}</td></tr>
+                <td>{device['service_type']}</td></tr>
           </table>
           <p style="color:#aaa;margin-top:32px;font-size:13px">
             This service type does not have a web interface.
           </p>
         </body></html>"""
-        self._url_var.set(f"bonjour://{device.get('server', device['instance'])}")
+        self._url_var.set(f"bonjour://{device['server']}")
+        self._fallback_url_var.set("")
+        self.btn_open_browser.configure(state=tk.DISABLED)
+        self._hide_fallback()
         if self._webview:
             self._webview.load_html(html)
 
@@ -602,7 +465,7 @@ class BonjourBrowser(tk.Tk):
 
     def _on_close(self):
         self._stop_scan()
-        self.after(400, self.destroy)
+        self.after(300, self.destroy)
 
 
 if __name__ == "__main__":
