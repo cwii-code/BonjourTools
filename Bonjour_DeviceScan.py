@@ -153,7 +153,6 @@ class BonjourBrowser(tk.Tk):
                                    state=tk.DISABLED)
         self.btn_scan.pack(side=tk.LEFT, padx=(0, 4))
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 10))
-
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, pady=2, padx=4)
 
         self._status = tk.StringVar(value="Ready — click Scan to start.")
@@ -204,10 +203,11 @@ class BonjourBrowser(tk.Tk):
     # ── Scan ──────────────────────────────────────────────────────────────
 
     def _start_scan(self):
+        # If already scanning, stop the current session first then restart
         if self._scanning:
-            return
+            self._stop_scan(silent=True)
+
         self._scanning = True
-        self.btn_scan.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
         self._status.set("Scanning…")
 
@@ -225,16 +225,17 @@ class BonjourBrowser(tk.Tk):
         self._zc = Zeroconf()
         [ServiceBrowser(self._zc, t, listener) for t in SERVICE_TYPES]
 
-    def _stop_scan(self):
+    def _stop_scan(self, silent: bool = False):
         self._scanning = False
         if self._zc:
-            threading.Thread(target=self._zc.close, daemon=True).start()
+            old_zc = self._zc
             self._zc = None
-        self.btn_scan.configure(state=tk.NORMAL)
+            threading.Thread(target=old_zc.close, daemon=True).start()
         self.btn_stop.configure(state=tk.DISABLED)
-        n = len(self._devices)
-        self._status.set(f"Stopped.  {n} device(s) found.")
-        self._count_var.set(f"{n} device(s) found.")
+        if not silent:
+            n = len(self._devices)
+            self._status.set(f"Stopped.  {n} device(s) found.")
+            self._count_var.set(f"{n} device(s) found.")
 
     # ── Device events ─────────────────────────────────────────────────────
 
