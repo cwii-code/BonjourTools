@@ -353,23 +353,45 @@ class BonjourBrowser(tk.Tk):
         ttk.Button(url_bar, text="Go", width=4,
                    command=lambda: self._load_url(self._url_var.get())).pack(side=tk.LEFT, padx=(4, 0))
 
+        # Open in system browser button (handles JS-heavy pages tkinterweb can't render)
+        self.btn_open_browser = ttk.Button(url_bar, text="🌐 Open in Browser", width=16,
+                                           command=self._open_in_browser, state=tk.DISABLED)
+        self.btn_open_browser.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Right panel: embedded view + fallback overlay
+        self._right_frame = right
+        self._webview_container = ttk.Frame(right)
+        self._webview_container.pack(fill=tk.BOTH, expand=True)
+
         if HAS_WEBVIEW:
-            self._webview = HtmlFrame(right, messages_enabled=False)
+            self._webview = HtmlFrame(self._webview_container, messages_enabled=False)
             self._webview.pack(fill=tk.BOTH, expand=True)
             self._webview.load_html(self._WELCOME_HTML)
+            # Detect load errors from tkinterweb
+            try:
+                self._webview.bind("<<LoadError>>", self._on_webview_error)
+            except Exception:
+                pass
         else:
             self._webview = None
-            f = ttk.Frame(right, relief=tk.SUNKEN)
-            f.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-            ttk.Label(
-                f,
-                text=(
-                    "tkinterweb is not installed.\n\n"
-                    "    pip install tkinterweb\n\n"
-                    "Without it, clicking a device opens your default browser."
-                ),
-                justify=tk.CENTER, foreground="#666", font=("Segoe UI", 10),
-            ).pack(expand=True)
+
+        # Fallback panel (hidden by default, shown when tkinterweb fails)
+        self._fallback_frame = ttk.Frame(self._webview_container)
+        self._fallback_url_var = tk.StringVar()
+        ttk.Label(self._fallback_frame,
+                  text="The embedded viewer cannot display this page.\n"
+                       "(Page may require JavaScript or HTTPS redirect)\n",
+                  justify=tk.CENTER, foreground="#666",
+                  font=("Segoe UI", 10)).pack(expand=True, pady=(80, 4))
+        ttk.Label(self._fallback_frame, textvariable=self._fallback_url_var,
+                  foreground="#0078d7", font=("Segoe UI", 10, "underline"),
+                  cursor="hand2").pack()
+        ttk.Button(self._fallback_frame, text="Open in Default Browser (Chrome / Edge)",
+                   command=self._open_in_browser,
+                   width=36).pack(pady=12)
+        ttk.Label(self._fallback_frame,
+                  text="Tip: ASPEED management pages require a modern browser.",
+                  foreground="#aaa", font=("Segoe UI", 9)).pack()
 
     def _build_statusbar(self):
         bar = ttk.Frame(self, relief=tk.SUNKEN)
@@ -477,7 +499,7 @@ class BonjourBrowser(tk.Tk):
 
     def _navigate_to(self, device: dict):
         url = _web_url(device["stype"], device["address"], device["port"])
-        self._status.set(f"Ready.")
+        self._status.set("Ready.")
         if url:
             self._load_url(url)
         else:
@@ -487,10 +509,47 @@ class BonjourBrowser(tk.Tk):
         if not url.strip():
             return
         self._url_var.set(url)
+        self._fallback_url_var.set(url)
+        self.btn_open_browser.configure(state=tk.NORMAL)
+        self._hide_fallback()
         if self._webview:
-            self._webview.load_url(url)
+            try:
+                self._webview.load_url(url)
+                # Schedule check: if tkinterweb shows its own error page, show fallback
+                self.after(3000, self._check_webview_error)
+            except Exception:
+                self._show_fallback()
         else:
-            import webbrowser
+            self._show_fallback()
+
+    def _check_webview_error(self):
+        """Show fallback if tkinterweb displayed its own error page."""
+        if not self._webview:
+            return
+        try:
+            title = self._webview.get_title()
+            if not title or title in ("", "about:blank"):
+                self._show_fallback()
+        except Exception:
+            pass
+
+    def _on_webview_error(self, _event=None):
+        self._show_fallback()
+
+    def _show_fallback(self):
+        if self._webview:
+            self._webview.pack_forget()
+        self._fallback_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _hide_fallback(self):
+        self._fallback_frame.pack_forget()
+        if self._webview:
+            self._webview.pack(fill=tk.BOTH, expand=True)
+
+    def _open_in_browser(self):
+        import webbrowser
+        url = self._url_var.get()
+        if url and not url.startswith("bonjour://"):
             webbrowser.open(url)
 
     def _go_back(self):
